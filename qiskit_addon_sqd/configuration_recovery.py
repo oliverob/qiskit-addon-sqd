@@ -304,3 +304,188 @@ def _bipartite_bitstring_correcting(
             )
 
     return bit_array
+
+
+def bitstring_to_IJ(bits, Na, Nb, Q):
+    """Convert one bitstring into I and J lists of integers. bits is array-like of 0/1."""
+    I = []
+    J = []
+    # alpha electrons
+    for a in range(Na):
+        block = bits[a*Q : (a+1)*Q]
+        I.append(int("".join(str(int(x)) for x in block), 2))
+    # beta electrons
+    for b in range(Nb):
+        block = bits[(Na+b)*Q : (Na+b+1)*Q]
+        J.append(int("".join(str(int(x)) for x in block), 2))
+    return I, J
+
+def IJ_to_bitstring(I, J, Q):
+    """Convert integer lists I and J into a flat bitstring (numpy array of 0/1) with Q qubits per integer."""
+    bits = []
+    for val in I + J:
+        bs = format(int(val), 'b').zfill(Q)
+        bits.extend([int(ch) for ch in bs])
+    return np.array(bits, dtype=int)
+
+def is_physical_from_IJ(I, J, M):
+    """Return (phys_occ_a, phys_occ_b, pauli_a, pauli_b)."""
+    # alpha range check: each occupation index must be in [0, M-1]
+    phys_occ_a = all(0 <= x < M for x in I) if len(I) > 0 else True
+    # beta range check
+    phys_occ_b = all(0 <= x < M for x in J) if len(J) > 0 else True
+    # alpha Pauli (no duplicates)
+    pauli_a = (len(I) == len(set(I)))
+    # beta Pauli (no duplicates)
+    pauli_b = (len(J) == len(set(J)))
+    return phys_occ_a, phys_occ_b, pauli_a, pauli_b
+
+
+# Recovery helpers
+def recover_list(current_list, M, weights, rng=None):
+    """
+    Recover only INVALID entries in `current_list`:
+      - Out-of-range elements (>= M or < 0)
+      - Duplicates (Pauli violations)
+
+    Valid elements are kept fixed.
+    Invalid elements are replaced by sampling WITHOUT replacement
+    from the remaining allowed orbitals, according to `weights`.
+
+    Returns a new repaired list.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    k = len(current_list)
+    if k == 0:
+        return []
+
+    # Normalize weights
+    w = np.asarray(weights, dtype=float)
+    if w.size != M:
+        raise ValueError("weights must have length M")
+    if np.all(w <= 0):
+        w = np.ones_like(w)
+    p = w / w.sum()
+
+    # Step 1: Identify valid entries
+    valid = []
+    invalid = []
+
+    # Count duplicates
+    seen = set()
+    for val in current_list:
+        if 0 <= val < M and val not in seen:
+            valid.append(val)
+            seen.add(val)
+        else:
+            invalid.append(val)
+
+    # If no invalid values, return same list
+    if len(invalid) == 0:
+        return list(current_list)
+
+    # Step 2: Determine allowed replacement orbitals
+    valid_set = set(valid)
+    allowed = np.array([u for u in range(M) if u not in valid_set])
+
+    # Probability restricted to allowed domain
+    p_allowed = p[allowed]
+    p_allowed /= p_allowed.sum()
+
+    # Step 3: Resample only invalid positions 
+    new_vals = list(
+        rng.choice(allowed, size=len(invalid), replace=False, p=p_allowed)
+    )
+
+    # Step 4: Construct final repaired list
+    # Keep original ordering: replace invalid items in-place
+    repaired = []
+    invalid_idx = 0
+    used = set(valid)
+
+    for val in current_list:
+        if val in used:
+            repaired.append(val)
+            used.remove(val)  # consume once
+        else:
+            repaired.append(new_vals[invalid_idx])
+            invalid_idx += 1
+
+    return repaired
+
+
+# Occupation estimation
+def estimate_occupations_from_samples(Xb, probs, Na, Nb, Q, M):
+    """
+    Estimate single-particle occupation probabilities (n_a, n_b) from sampled bitstrings Xb with associated probs.
+    - Xb: (n_out, (Na+Nb)*Q) array of bitstrings (0/1)
+    - probs: length n_out array with probabilities / frequencies that sum (or not). We sum weighted counts.
+    """
+    n_out = Xb.shape[0]
+    n_a = np.zeros(M, dtype=float)
+    n_b = np.zeros(M, dtype=float)
+    for idx in range(n_out):
+        bits = Xb[idx].astype(int)
+        p = float(probs[idx])
+        I, J = bitstring_to_IJ(bits, Na, Nb, Q)
+        for u in I:
+            if 0 <= u < M:
+                n_a[u] += p
+        for u in J:
+            if 0 <= u < M:
+                n_b[u] += p
+    eps = 1e-12
+    if n_a.sum() <= 0: n_a += eps
+    if n_b.sum() <= 0: n_b += eps
+    return n_a, n_b
+
+
+# Apply recovery to distribution
+def apply_recovery_to_distribution(Xb, probs, Na, Nb, Q, M, n_a, n_b, rng=None):
+    """
+    Try to repair each sampled bitstring to a physical state using recover_bitstring.
+    Returns: (Xb_rec, probs_copy, success_flags)
+    - Xb_rec has same shape as Xb
+    - success_flags is boolean array whether recovered state is physical
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    n_out = Xb.shape[0]
+    Xb_rec = np.empty_like(Xb)
+    success_flags = []
+    for idx in range(n_out):
+        bits = Xb[idx].astype(int)
+        I, J = bitstring_to_IJ(bits, Na, Nb, Q)
+        phys_occ_a, phys_occ_b, pauli_a, pauli_b = is_physical_from_IJ(I, J, M)
+
+        if phys_occ_a and phys_occ_b and pauli_a and pauli_b:
+            # already physical
+            Xb_rec[idx] = bits
+            success_flags.append(True)
+            continue
+
+        new_bits, I_new, J_new, ok = recover_bitstring(bits, Na, Nb, Q, M, n_a, n_b, rng=rng)
+        Xb_rec[idx] = new_bits
+        success_flags.append(ok)
+
+    return Xb_rec, probs.copy(), np.array(success_flags, dtype=bool)
+
+
+def recover_bitstring(bts, Na, Nb, Q, M, n_a, n_b, rng=None):
+    """
+    Wrapper that:
+      - parses bts -> I,J
+      - recovers new I,J using weighted sampling from n_a/n_b
+      - returns new bitstring, I_new, J_new, ok_flag
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    I, J = bitstring_to_IJ(bts, Na, Nb, Q)
+    I_new = recover_list(I, M, n_a, rng=rng)
+    J_new = recover_list(J, M, n_b, rng=rng)
+    new_bits = IJ_to_bitstring(I_new, J_new, Q)
+    phys_occ_a, phys_occ_b, pauli_a, pauli_b = is_physical_from_IJ(I_new, J_new, M)
+    ok = (phys_occ_a and phys_occ_b and pauli_a and pauli_b)
+    return new_bits, I_new, J_new, ok

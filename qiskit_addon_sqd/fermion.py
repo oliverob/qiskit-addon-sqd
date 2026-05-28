@@ -34,8 +34,8 @@ from pyscf.fci.selected_ci import (
 from qiskit.primitives import BitArray
 from scipy import linalg as LA
 
-from .configuration_recovery import recover_configurations
-from .counts import bit_array_to_arrays, bitstring_matrix_to_integers
+from .configuration_recovery import recover_configurations, apply_recovery_to_distribution, estimate_occupations_from_samples
+from .counts import bit_array_to_arrays, bitstring_matrix_to_integers, samples_to_arrays
 from .subsampling import postselect_by_hamming_right_and_left, subsample
 
 config.update("jax_enable_x64", True)  # To deal with large integers
@@ -149,7 +149,7 @@ class SCIResult:
 def diagonalize_fermionic_hamiltonian(
     one_body_tensor: np.ndarray,
     two_body_tensor: np.ndarray,
-    bit_array: BitArray,
+    first_quantised_samples: np.ndarray,
     samples_per_batch: int,
     norb: int,
     nelec: tuple[int, int],
@@ -176,12 +176,9 @@ def diagonalize_fermionic_hamiltonian(
     Args:
         one_body_tensor: The one-body tensor of the Hamiltonian.
         two_body_tensor: The two-body tensor of the Hamiltonian.
-        bit_array: Array of sampled bitstrings. Each bitstring should have both the
-            alpha part and beta part concatenated together, with the alpha part
-            concatenated on the right-hand side, like this:
-            ``[b_N, ..., b_0, a_N, ..., a_0]``.
-        samples_per_batch: The number of bitstrings to include in each subsampled batch
-            of bitstrings.
+        first_quantised_samples: Array of sampled first-quantized configurations.
+        samples_per_batch: The number of configurations to include in each subsampled batch
+            of configurations.
         norb: The number of spatial orbitals.
         nelec: The numbers of alpha and beta electrons.
         num_batches: The number of batches to subsample in each configuration recovery
@@ -295,17 +292,29 @@ def diagonalize_fermionic_hamiltonian(
     carryover_strings_a = np.array([], dtype=np.int64)
     carryover_strings_b = np.array([], dtype=np.int64)
 
-    # Convert BitArray into bitstring and probability arrays
-    raw_bitstrings, raw_probs = bit_array_to_arrays(bit_array)
+    print(f"Generated {len(first_quantised_samples)} raw 1st quantised samples with shape {first_quantised_samples.shape}.")
+    print(f"Example raw sample:\n{first_quantised_samples[0]}")
+    raw_bitstrings, raw_probs = samples_to_arrays(first_quantised_samples)
+
 
     # Run configuration recovery loop
     for _ in range(max_iterations):
         if current_occupancies is None:
             # If we don't have average orbital occupancy information, simply postselect
             # bitstrings with the correct numbers of spin-up and spin-down electrons
-            bitstrings, probs = postselect_by_hamming_right_and_left(
-                raw_bitstrings, raw_probs, hamming_right=n_alpha, hamming_left=n_beta
-            )
+            # Valid 1st quantised samples
+            valid = np.apply_along_axis(is_valid_first_quantised_sample, 1, raw_bitstrings, nelec[0], nelec[1], norb)
+            valid_first_quantised_bitstring = raw_bitstrings[valid]
+            valid_first_quantised_probs = raw_probs[valid]/np.sum(raw_probs[valid])
+            print(f"Filtered down to {len(valid_first_quantised_bitstring)} valid 1st quantised samples.")
+            print(f"Example valid sample:\n{valid_first_quantised_bitstring[0]}")
+
+            # 2nd quantised samples
+            second_quantised_bitstrings = np.array([convert_first_to_second_quantised_sample(sample, n_alpha, n_beta, norb) for sample in valid_first_quantised_bitstring])
+            print(f"Converted to {len(second_quantised_bitstrings)} 2nd quantised samples")
+            print(f"Example 2nd quantised sample:\n{second_quantised_bitstrings[0]}")
+            bitstrings = second_quantised_bitstrings
+            probs = valid_first_quantised_probs
             if not bitstrings.size:
                 raise ValueError(
                     "The input bit array did not contain any valid bitstrings. "
@@ -315,9 +324,17 @@ def diagonalize_fermionic_hamiltonian(
         else:
             # If we do have average orbital occupancy information, use it to refine the
             # full set of noisy configurations
-            bitstrings, probs = recover_configurations(
-                raw_bitstrings, raw_probs, current_occupancies, n_alpha, n_beta, rand_seed=rng
+            n_a, n_b = np.flip(current_occupancies)
+            first_quantised_bitstrings, probs, success_flags = apply_recovery_to_distribution(
+                raw_bitstrings, raw_probs, n_alpha, n_beta, int(np.ceil(np.log2(norb))),norb, n_a, n_b
             )
+            valid = np.apply_along_axis(is_valid_first_quantised_sample, 1, first_quantised_bitstrings, nelec[0], nelec[1], norb)
+            valid_first_quantised_bitstrings = first_quantised_bitstrings[valid]
+            probs = probs[valid]/np.sum(probs[valid])
+            bitstrings = np.array([convert_first_to_second_quantised_sample(sample, n_alpha, n_beta, norb) for sample in valid_first_quantised_bitstrings])
+        print(f"Applied configuration recovery to get {len(bitstrings)} bitstrings for this iteration.")
+        print(f"current_occupancies: {current_occupancies}")
+        print(f"Example 2nd quantised sample:\n{second_quantised_bitstrings[np.random.randint(len(second_quantised_bitstrings))]}")
 
         # Subsample batches of bitstrings
         subsamples = subsample(
@@ -975,3 +992,38 @@ def _transition_str_to_bool(string_rep: np.ndarray) -> tuple[np.ndarray, np.ndar
     annihilate = np.logical_or(string_rep == "-", string_rep == "n")
 
     return diag, create, annihilate
+
+def is_valid_first_quantised_sample(sample,n_alpha, n_beta, n_orbitals):
+    # Check if the sample has the correct shape
+    if sample.shape[0] != (n_alpha + n_beta) * int(np.ceil(np.log2(n_orbitals))):
+        return False
+    sample_reshaped = sample.reshape((n_alpha + n_beta, int(np.ceil(np.log2(n_orbitals)))))
+    # Check if the sample contains only 0s and 1s
+    if not np.all(np.isin(sample_reshaped, [0, 1])):
+        return False
+    # Check if each orbital is occupied by at most one alpha electron
+    if not (np.unique(sample_reshaped[:n_alpha], axis=0).shape[0] == sample_reshaped[:n_alpha].shape[0]):
+        return False
+    # Check if each orbital is occupied by at most one beta electron
+    if not (np.unique(sample_reshaped[n_alpha:n_alpha+n_beta], axis=0).shape[0] == sample_reshaped[n_alpha:n_alpha+n_beta].shape[0]):
+        return False
+    # Check no junk orbitals are occupied (i.e., all occupied orbitals must be within the first n_orbitals)
+    for electron in sample_reshaped:
+        orbital_index = int("".join(map(str, electron)), 2)
+        if orbital_index >= n_orbitals:
+            return False
+
+    return True
+    
+def convert_first_to_second_quantised_sample(first_quantised_sample, n_alpha, n_beta, n_orbitals):
+    first_quantised_sample_reshaped = first_quantised_sample.reshape((n_alpha + n_beta, int(np.ceil(np.log2(n_orbitals)))))
+    second_quantised_sample = np.zeros(2*n_orbitals, dtype=int)
+    
+    for electron in first_quantised_sample_reshaped[:n_alpha]:  # Process alpha electrons
+        orbital_index = int("".join(str(int(x)) for x in electron), 2)
+        second_quantised_sample[orbital_index] = 1
+    for electron in first_quantised_sample_reshaped[n_alpha:n_alpha+n_beta]:  # Process beta electrons
+        orbital_index = int("".join(str(int(x)) for x in electron), 2)
+        second_quantised_sample[n_orbitals + orbital_index] = 1
+        
+    return second_quantised_sample
