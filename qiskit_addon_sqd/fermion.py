@@ -149,7 +149,7 @@ class SCIResult:
 def diagonalize_fermionic_hamiltonian(
     one_body_tensor: np.ndarray,
     two_body_tensor: np.ndarray,
-    first_quantised_samples: np.ndarray,
+    bit_array: np.ndarray,
     samples_per_batch: int,
     norb: int,
     nelec: tuple[int, int],
@@ -170,6 +170,7 @@ def diagonalize_fermionic_hamiltonian(
     carryover_threshold: float = 1e-4,
     callback: Callable[[list[SCIResult]], None] | None = None,
     seed: int | np.random.Generator | None = None,
+    first_quantisation: bool = False,
 ) -> SCIResult:
     """Run the sample-based quantum diagonalization (SQD) algorithm.
 
@@ -291,30 +292,36 @@ def diagonalize_fermionic_hamiltonian(
     include_b = np.unique(include_b)
     carryover_strings_a = np.array([], dtype=np.int64)
     carryover_strings_b = np.array([], dtype=np.int64)
-
-    print(f"Generated {len(first_quantised_samples)} raw 1st quantised samples with shape {first_quantised_samples.shape}.")
-    print(f"Example raw sample:\n{first_quantised_samples[0]}")
-    raw_bitstrings, raw_probs = samples_to_arrays(first_quantised_samples)
-
+    if first_quantisation:
+        print(f"Generated {len(bit_array)} raw 1st quantised samples with shape {bit_array.shape}.")
+        print(f"Example raw sample:\n{bit_array[0]}")
+        raw_bitstrings, raw_probs = samples_to_arrays(bit_array)
+    else:
+        raw_bitstrings, raw_probs = bit_array_to_arrays(bit_array)
 
     # Run configuration recovery loop
     for _ in range(max_iterations):
         if current_occupancies is None:
-            # If we don't have average orbital occupancy information, simply postselect
-            # bitstrings with the correct numbers of spin-up and spin-down electrons
-            # Valid 1st quantised samples
-            valid = np.apply_along_axis(is_valid_first_quantised_sample, 1, raw_bitstrings, nelec[0], nelec[1], norb)
-            valid_first_quantised_bitstring = raw_bitstrings[valid]
-            valid_first_quantised_probs = raw_probs[valid]/np.sum(raw_probs[valid])
-            print(f"Filtered down to {len(valid_first_quantised_bitstring)} valid 1st quantised samples.")
-            print(f"Example valid sample:\n{valid_first_quantised_bitstring[0]}")
+            if first_quantisation:
+                # Valid 1st quantised samples
+                valid = np.apply_along_axis(is_valid_first_quantised_sample, 1, raw_bitstrings, nelec[0], nelec[1], norb)
+                valid_first_quantised_bitstring = raw_bitstrings[valid]
+                valid_first_quantised_probs = raw_probs[valid]/np.sum(raw_probs[valid])
+                print(f"Filtered down to {len(valid_first_quantised_bitstring)} valid 1st quantised samples.")
+                print(f"Example valid sample:\n{valid_first_quantised_bitstring[0]}")
 
-            # 2nd quantised samples
-            second_quantised_bitstrings = np.array([convert_first_to_second_quantised_sample(sample, n_alpha, n_beta, norb) for sample in valid_first_quantised_bitstring])
-            print(f"Converted to {len(second_quantised_bitstrings)} 2nd quantised samples")
-            print(f"Example 2nd quantised sample:\n{second_quantised_bitstrings[0]}")
-            bitstrings = second_quantised_bitstrings
-            probs = valid_first_quantised_probs
+                # 2nd quantised samples
+                second_quantised_bitstrings = np.array([convert_first_to_second_quantised_sample(sample, n_alpha, n_beta, norb) for sample in valid_first_quantised_bitstring])
+                print(f"Converted to {len(second_quantised_bitstrings)} 2nd quantised samples")
+                print(f"Example 2nd quantised sample:\n{second_quantised_bitstrings[0]}")
+                bitstrings = second_quantised_bitstrings
+                probs = valid_first_quantised_probs
+            else:
+                # If we don't have average orbital occupancy information, simply postselect
+                # bitstrings with the correct numbers of spin-up and spin-down electrons
+                bitstrings, probs = postselect_by_hamming_right_and_left(
+                raw_bitstrings, raw_probs, hamming_right=n_alpha, hamming_left=n_beta
+            )
             if not bitstrings.size:
                 raise ValueError(
                     "The input bit array did not contain any valid bitstrings. "
@@ -324,17 +331,24 @@ def diagonalize_fermionic_hamiltonian(
         else:
             # If we do have average orbital occupancy information, use it to refine the
             # full set of noisy configurations
-            n_a, n_b = np.flip(current_occupancies)
-            first_quantised_bitstrings, probs, success_flags = apply_recovery_to_distribution(
-                raw_bitstrings, raw_probs, n_alpha, n_beta, int(np.ceil(np.log2(norb))),norb, n_a, n_b
-            )
-            valid = np.apply_along_axis(is_valid_first_quantised_sample, 1, first_quantised_bitstrings, nelec[0], nelec[1], norb)
-            valid_first_quantised_bitstrings = first_quantised_bitstrings[valid]
-            probs = probs[valid]/np.sum(probs[valid])
-            bitstrings = np.array([convert_first_to_second_quantised_sample(sample, n_alpha, n_beta, norb) for sample in valid_first_quantised_bitstrings])
+            if first_quantisation:
+                n_a, n_b = np.flip(current_occupancies)
+                first_quantised_bitstrings, probs, success_flags = apply_recovery_to_distribution(
+                    raw_bitstrings, raw_probs, n_alpha, n_beta, int(np.ceil(np.log2(norb))),norb, n_a, n_b
+                )
+                valid = np.apply_along_axis(is_valid_first_quantised_sample, 1, first_quantised_bitstrings, nelec[0], nelec[1], norb)
+                valid_first_quantised_bitstrings = first_quantised_bitstrings[valid]
+                probs = probs[valid]/np.sum(probs[valid])
+                bitstrings = np.array([convert_first_to_second_quantised_sample(sample, n_alpha, n_beta, norb) for sample in valid_first_quantised_bitstrings])
+            else:
+                # If we do have average orbital occupancy information, use it to refine the
+                # full set of noisy configurations
+                bitstrings, probs = recover_configurations(
+                    raw_bitstrings, raw_probs, current_occupancies, n_alpha, n_beta, rand_seed=rng
+                )
         print(f"Applied configuration recovery to get {len(bitstrings)} bitstrings for this iteration.")
         print(f"current_occupancies: {current_occupancies}")
-        print(f"Example 2nd quantised sample:\n{second_quantised_bitstrings[np.random.randint(len(second_quantised_bitstrings))]}")
+        print(f"Example 2nd quantised sample:\n{bitstrings[np.random.randint(len(bitstrings))]}")
 
         # Subsample batches of bitstrings
         subsamples = subsample(
