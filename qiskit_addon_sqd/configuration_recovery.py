@@ -452,26 +452,26 @@ def apply_recovery_to_distribution(Xb, probs, Na, Nb, Q, M, n_a, n_b, rng=None):
     """
     if rng is None:
         rng = np.random.default_rng()
-    n_out = Xb.shape[0]
-    Xb_rec = np.empty_like(Xb)
-    success_flags = []
-    for idx in range(n_out):
-        bits = Xb[idx].astype(int)
+    corrected_dict = defaultdict(float)
+    for bitstring, prob in zip(Xb, probs):
+        bits = bitstring.astype(int)
         I, J = bitstring_to_IJ(bits, Na, Nb, Q)
         phys_occ_a, phys_occ_b, pauli_a, pauli_b = is_physical_from_IJ(I, J, M)
 
         if phys_occ_a and phys_occ_b and pauli_a and pauli_b:
             # already physical
-            Xb_rec[idx] = bits
-            success_flags.append(True)
+            bs_str = "".join("1" if bit else "0" for bit in bits)
+            corrected_dict[bs_str] += prob
             continue
 
         new_bits, I_new, J_new, ok = recover_bitstring(bits, Na, Nb, Q, M, n_a, n_b, rng=rng)
-        Xb_rec[idx] = new_bits
-        success_flags.append(ok)
+        bs_str = "".join("1" if bit else "0" for bit in new_bits)
+        corrected_dict[bs_str] += prob
+    bs_mat_out = np.array([[bit == "1" for bit in bs] for bs in corrected_dict]).astype(np.uint8)
+    probs_out = np.array([f for f in corrected_dict.values()])
+    probs_out = np.abs(probs_out) / np.sum(np.abs(probs_out))
 
-    return Xb_rec, probs.copy(), np.array(success_flags, dtype=bool)
-
+    return bs_mat_out, probs_out
 
 def recover_bitstring(bts, Na, Nb, Q, M, n_a, n_b, rng=None):
     """

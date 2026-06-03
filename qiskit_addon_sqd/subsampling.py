@@ -136,6 +136,7 @@ def postselect_by_hamming_right_and_left(
     valid_right = np.sum(bitstring_matrix[:, norb:], axis=1) == hamming_right
     valid_left = np.sum(bitstring_matrix[:, :norb], axis=1) == hamming_left
     valid_indices = np.logical_and(valid_right, valid_left)
+    print(f"Post-selected {np.sum(valid_indices)} valid samples out of {n_bitstrings} total samples.")
 
     bitstrings_post = bitstring_matrix[valid_indices]
     probs_post = probabilities[valid_indices]

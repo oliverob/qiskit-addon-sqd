@@ -3,7 +3,7 @@ from functools import partial
 
 import matplotlib.pyplot as plt
 import numpy as np
-from pyscf import ao2mo, gto, mcscf, scf
+from pyscf import ao2mo, gto, mcscf, scf, tools
 from qiskit.primitives import BitArray
 
 from .fermion import SCIResult, diagonalize_fermionic_hamiltonian, solve_sci_batch
@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> None:
             "energy-error histories (shaded bands)."
         )
     )
-    parser.add_argument("--n-runs", type=int, default=50)
+    parser.add_argument("--n-runs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--num-samples", type=int, default=20_000)
     parser.add_argument("--max-iterations", type=int, default=10)
@@ -112,16 +112,25 @@ def main(argv: list[str] | None = None) -> None:
     rng = np.random.default_rng(args.seed)
 
     # Build molecule
-    mol = gto.Mole()
+    # mol = gto.Mole()
     # mol.build(
     #     atom=[["H", (0, 0, 0)], ["H", (1.0, 0, 0)], ["H", (2.0, 0, 0)], ["H", (3.0, 0, 0)]],
     #     basis="6-31g",
     # )
-    mol.build(
-        atom=[["Li", (0, 0, 0)], ["H", (1.0, 0, 0)]],
-        basis="6-31g",
-    )
-    scf_result = scf.RHF(mol).run()
+    # scf_result = scf.RHF(mol).run()
+    dist=3.0
+    basis="6-31g"
+    scf_result = tools.fcidump.to_scf('./fci_dump files/' + f'LiH_{dist:.3f}A_{basis}.txt').run()
+    
+    # dist=1.5
+    # basis="6-31g"
+    # scf_result = tools.fcidump.to_scf('./fci_dump files/' + f'fci_dump-H4_{dist:.2f}A_{basis}.txt').run()
+    mol = scf_result.mol
+    # mol.build(
+    #     atom=[["Li", (0, 0, 0)], ["H", (1.0, 0, 0)]],
+    #     basis="6-31g",
+    # )
+    # scf_result = scf.RHF(mol).run()
 
     # Define active space
     n_frozen = 0
@@ -165,8 +174,11 @@ def main(argv: list[str] | None = None) -> None:
     n_alpha, n_beta = nelec
 
     for run_idx in range(args.n_runs):
-        first_quantised_samples = np.random.randint(0, 2, size=(args.num_samples, n_electrons, int(np.ceil(np.log2(norb)))), dtype=np.uint8)
-        second_quantised_bitstrings = BitArray.from_bool_array(np.random.randint(0, 2, size=(args.num_samples, 2 * norb), dtype=np.bool))
+
+        # first_quantised_samples = np.random.randint(0, 2, size=(args.num_samples, n_electrons, int(np.ceil(np.log2(norb)))), dtype=np.uint8)
+        first_quantised_samples = np.load("./lih_1stresults.npy").reshape(-1, n_electrons,int(np.ceil(np.log2(norb)))).astype(np.uint8)
+        # second_quantised_bitstrings = BitArray.from_bool_array(np.random.randint(0, 2, size=(args.num_samples, 2 * norb), dtype=np.bool))
+        second_quantised_bitstrings = BitArray.from_bool_array(np.load("./lih_2ndresults.npy").reshape(-1, 2 * norb).astype(np.bool))
 
         print(f"Run {run_idx + 1}/{args.n_runs}")
 
@@ -232,7 +244,7 @@ def main(argv: list[str] | None = None) -> None:
     first_occ_mean = np.mean(np.stack(first_occ, axis=0), axis=0)
     second_occ_mean = np.mean(np.stack(second_occ, axis=0), axis=0)
 
-    fig, axs = plt.subplots(2, 2, figsize=(12, 6))
+    fig, axs = plt.subplots(2, 1, figsize=(12, 6))
     # yt1 = [1.0, 1e-1, 1e-2, 1e-3, 1e-4]
 
     # Chemical accuracy (+/- 1 milli-Hartree)
@@ -248,32 +260,32 @@ def main(argv: list[str] | None = None) -> None:
         lower = np.maximum(mean - std, 0)
         upper = mean + std
 
-        axs[i, 0].plot(x, mean, label="mean energy error")
-        axs[i, 0].fill_between(x, lower, upper, alpha=0.25, label="±1σ")
+        axs[i].plot(x, mean, label="mean energy error")
+        axs[i].fill_between(x, lower, upper, alpha=0.25, label="±1σ")
         # axs[i, 0].set_yticks(yt1)
         # axs[i, 0].set_yticklabels(yt1)
         # axs[i, 0].set_yscale("log")
         # axs[i, 0].set_ylim(1e-4)
-        axs[i, 0].axhline(
+        axs[i].axhline(
             y=chem_accuracy,
             color="black",
             linestyle="--",
             label="chemical accuracy",
         )
-        axs[i, 0].set_title(
-            f"{label} Quantisation Approximated Ground State Energy Error vs SQD Iterations"
+        axs[i].set_title(
+            f"LiH 6-31g {label} Quantisation Approximated Ground State Energy Error vs SQD Iterations"
         )
-        axs[i, 0].set_xlabel("SQD iteration", fontdict={"fontsize": 12})
-        axs[i, 0].set_ylabel("Energy Error (Ha)", fontdict={"fontsize": 12})
-        axs[i, 0].legend()
+        axs[i].set_xlabel("SQD iteration", fontdict={"fontsize": 12})
+        axs[i].set_ylabel("Energy Error (Ha)", fontdict={"fontsize": 12})
+        axs[i].legend()
 
-        x2 = np.arange(occ_mean.shape[0])
-        axs[i, 1].bar(x2, occ_mean, width=0.8)
-        axs[i, 1].set_xticks(x2)
-        axs[i, 1].set_xticklabels(x2)
-        axs[i, 1].set_title(f"{label} Quantisation Avg Occupancy per Spatial Orbital")
-        axs[i, 1].set_xlabel("Orbital Index", fontdict={"fontsize": 12})
-        axs[i, 1].set_ylabel("Avg Occupancy", fontdict={"fontsize": 12})
+        # x2 = np.arange(occ_mean.shape[0])
+        # axs[i, 1].bar(x2, occ_mean, width=0.8)
+        # axs[i, 1].set_xticks(x2)
+        # axs[i, 1].set_xticklabels(x2)
+        # axs[i, 1].set_title(f"{label} Quantisation Avg Occupancy per Spatial Orbital")
+        # axs[i, 1].set_xlabel("Orbital Index", fontdict={"fontsize": 12})
+        # axs[i, 1].set_ylabel("Avg Occupancy", fontdict={"fontsize": 12})
 
     plt.tight_layout()
     plt.show()

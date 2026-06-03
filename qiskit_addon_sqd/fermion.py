@@ -332,8 +332,8 @@ def diagonalize_fermionic_hamiltonian(
             # If we do have average orbital occupancy information, use it to refine the
             # full set of noisy configurations
             if first_quantisation:
-                n_a, n_b = np.flip(current_occupancies)
-                first_quantised_bitstrings, probs, success_flags = apply_recovery_to_distribution(
+                n_a, n_b = current_occupancies
+                first_quantised_bitstrings, probs = apply_recovery_to_distribution(
                     raw_bitstrings, raw_probs, n_alpha, n_beta, int(np.ceil(np.log2(norb))),norb, n_a, n_b
                 )
                 valid = np.apply_along_axis(is_valid_first_quantised_sample, 1, first_quantised_bitstrings, nelec[0], nelec[1], norb)
@@ -346,10 +346,11 @@ def diagonalize_fermionic_hamiltonian(
                 bitstrings, probs = recover_configurations(
                     raw_bitstrings, raw_probs, current_occupancies, n_alpha, n_beta, rand_seed=rng
                 )
-        print(f"Applied configuration recovery to get {len(bitstrings)} bitstrings for this iteration.")
+        print(f"Applied configuration recovery to get {len(bitstrings)} unique bitstrings for this iteration.")
         print(f"current_occupancies: {current_occupancies}")
         print(f"Example 2nd quantised sample:\n{bitstrings[np.random.randint(len(bitstrings))]}")
-
+        for i in range(5):
+            print(f"{i}th most common bitstring:\n{bitstrings[np.argsort(probs)[::-1][i]]} with probability {probs[np.argsort(probs)[::-1][i]]}")
         # Subsample batches of bitstrings
         subsamples = subsample(
             bitstrings,
@@ -1040,4 +1041,4 @@ def convert_first_to_second_quantised_sample(first_quantised_sample, n_alpha, n_
         orbital_index = int("".join(str(int(x)) for x in electron), 2)
         second_quantised_sample[n_orbitals + orbital_index] = 1
         
-    return second_quantised_sample
+    return second_quantised_sample[::-1] # switch to little endian
