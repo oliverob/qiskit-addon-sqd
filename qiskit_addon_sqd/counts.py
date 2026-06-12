@@ -20,6 +20,27 @@ from collections.abc import Mapping
 import numpy as np
 from qiskit.primitives import BitArray
 
+def samples_to_arrays(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Convert a raw samples array into a bitstring matrix and a probability array.
+
+    Args:
+        samples: A raw samples array of shape (num_samples, num_electrons, num_bits_per_orbital)
+    Returns:
+        - A 2D array representing the sampled bitstrings. Each row represents a
+          bitstring, and each element is a ``bool`` representation of the
+          bit's value
+        - A 1D array containing the probability with which each bitstring was sampled
+    """
+    num_samples, num_electrons, num_bits_per_orbital = samples.shape
+
+    if num_samples == 0:
+        return np.empty((0, num_electrons * num_bits_per_orbital), dtype=bool), np.array([])
+
+    bitstring_matrix = samples.reshape(num_samples, num_electrons * num_bits_per_orbital)
+    bitstring_matrix, counts = np.unique(bitstring_matrix, axis=0, return_counts=True)
+    prob_array = counts / num_samples
+
+    return bitstring_matrix, prob_array
 
 def counts_to_arrays(counts: Mapping[str, float | int]) -> tuple[np.ndarray, np.ndarray]:
     """Convert a counts dictionary into a bitstring matrix and a probability array.
